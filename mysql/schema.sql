@@ -21,6 +21,11 @@ SET NAMES utf8mb4;
 
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS riding_record;
+DROP TABLE IF EXISTS handover_item_log;
+DROP TABLE IF EXISTS handover_acceptance;
+DROP TABLE IF EXISTS handover_item;
+DROP TABLE IF EXISTS duty_seq_lock;
+DROP TABLE IF EXISTS duty_shift;
 DROP TABLE IF EXISTS health_event_session;
 DROP TABLE IF EXISTS health_review;
 DROP TABLE IF EXISTS health_event_log;
@@ -298,6 +303,138 @@ CREATE TABLE health_event_session (
     CONSTRAINT fk_hes_session FOREIGN KEY (session_id) REFERENCES lesson_session (id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '健康事件影响的未来排期（可追溯，不删排期）';
 
+-- ---------------------------------------------------------------------------
+-- 值班班次：值班负责人建立，OPEN 进行中 -> CLOSED 已结束。
+-- 交接期间允许新旧两个 OPEN 班次并存（下一班先建立、当班再结束），
+-- 「班次链」的结构性操作（建班 / 关班 / 期间课程变更入队）都串行在全局序号锁上。
+-- ---------------------------------------------------------------------------
+CREATE TABLE duty_shift (
+    id              BIGINT       NOT NULL AUTO_INCREMENT,
+    shift_no        VARCHAR(32)  NOT NULL COMMENT '班次编号，唯一，形如 DS-000001',
+    shift_date      DATE         NOT NULL COMMENT '值班日期',
+    leader_name     VARCHAR(64)  NOT NULL COMMENT '值班负责人姓名',
+    handover_note   VARCHAR(1000)         COMMENT '当班交接总说明（可多次补充）',
+    status          VARCHAR(16)  NOT NULL COMMENT 'OPEN 进行中 / CLOSED 已结束',
+    -- 班次版本：事项分派 / 新事项挂入 / 关班都 +1，旧页面拿旧版本提交直接 409
+    item_version    BIGINT       NOT NULL DEFAULT 0 COMMENT '交接清单版本（乐观锁）',
+    -- 开班幂等键：重复点击 / 网络重试只取回同一个班次，绝不连开两个班
+    create_request_id VARCHAR(64)          COMMENT '开班请求幂等键',
+    started_at      DATETIME     NOT NULL COMMENT '开班时间',
+    closed_at       DATETIME              COMMENT '结班时间',
+    created_at      DATETIME     NOT NULL COMMENT '创建时间',
+    updated_at      DATETIME     NOT NULL COMMENT '更新时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_duty_shift_no (shift_no),
+    UNIQUE KEY uk_duty_shift_request (create_request_id),
+    KEY idx_duty_shift_date (shift_date),
+    KEY idx_duty_shift_status (status)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '值班班次';
+
+-- ---------------------------------------------------------------------------
+-- 全局序号锁：整库固定一行（id=1）。
+-- 开班 / 关班 / 交接期间课程变更入队先抢这把锁，
+-- 保证「新出现的课程变更进入正确班次」以及「未承接事项不会在关班时漏派」，
+-- 不依赖多条 shift 行的加锁顺序，从根上避免循环等待。
+-- ---------------------------------------------------------------------------
+CREATE TABLE duty_seq_lock (
+    id          BIGINT      NOT NULL,
+    holder      VARCHAR(64)          COMMENT '当前持锁说明（仅排障用）',
+    updated_at  DATETIME             COMMENT '最近加锁时间',
+    PRIMARY KEY (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '值班交接链全局序号锁';
+
+INSERT INTO duty_seq_lock (id, holder, updated_at) VALUES (1, NULL, NOW());
+
+-- ---------------------------------------------------------------------------
+-- 交接事项（未结事项）：开班时从当班课程 / 马匹状态 / 栏位安排生成快照，
+-- 值班期间的课程变更实时挂入当前最新 OPEN 班次；普通教练可补充、负责人可改优先级 / 分派。
+-- 事项状态机：PENDING 待承接 -> ACCEPTED 已承接（终态）。
+-- 承接只由「目标班次负责人」逐项确认；已承接事项任何旧班次都不能改回未处理。
+-- 未承接事项在班次结束后靠 target_shift_id 继续挂在下一班首页，不因班次结束消失。
+-- 全局唯一键保证同一业务对象（同一排期变更 / 同一匹马 / 同一栏位 / 同一手工键）
+-- 在未承接时只存在一条，快照生成与实时挂入共用这套去重。
+-- ---------------------------------------------------------------------------
+CREATE TABLE handover_item (
+    id                BIGINT       NOT NULL AUTO_INCREMENT,
+    item_no           VARCHAR(32)  NOT NULL COMMENT '事项编号，唯一，形如 HI-000001',
+    shift_id          BIGINT       NOT NULL COMMENT '来源班次（事项由哪个班次产生）',
+    target_shift_id   BIGINT                COMMENT '承接班次（分派给哪个班次；null=尚未分派）',
+    item_type         VARCHAR(24)  NOT NULL COMMENT 'SESSION 课程 / HORSE 马匹 / STALL 栏位 / MANUAL 手工',
+    ref_type          VARCHAR(24)           COMMENT 'SESSION_CHANGE 课程变更 / HORSE_STATUS 马匹状态 / STALL_MAINT 栏位维护 / MANUAL',
+    ref_id            BIGINT                COMMENT '关联对象 id（排期 / 马匹 / 栏位）',
+    change_kind       VARCHAR(24)           COMMENT '课程变更细分：NEW 新排期 / CANCELED 取消 / AFFECTED 健康受影响 / FULL 已满员',
+    title             VARCHAR(200) NOT NULL COMMENT '事项标题',
+    detail            VARCHAR(1000)         COMMENT '事项快照说明（开班时的状态定格）',
+    priority          VARCHAR(16)  NOT NULL COMMENT 'HIGH 高 / NORMAL 普通 / LOW 低',
+    owner_name        VARCHAR(64)           COMMENT '负责教练（普通教练只能补充分派给自己的事项）',
+    status            VARCHAR(16)  NOT NULL COMMENT 'PENDING 待承接 / ACCEPTED 已承接（终态）',
+    expected_version  BIGINT       NOT NULL DEFAULT 0 COMMENT '事项自身版本（补充 / 改优先级 / 分派 / 承接的乐观锁）',
+    accepted_at       DATETIME              COMMENT '承接时间',
+    accepted_by       VARCHAR(64)           COMMENT '承接人（目标班次负责人）',
+    accepted_note     VARCHAR(500)          COMMENT '承接说明',
+    -- 关班时仍未承接：负责人逐项记录延期原因后才允许完成交接（关班原子写入）
+    delay_reason      VARCHAR(500)          COMMENT '延期原因（未承接即结班时逐项填写）',
+    delayed_at        DATETIME              COMMENT '延期记录时间',
+    delayed_by        VARCHAR(64)           COMMENT '记录延期的负责人',
+    request_id        VARCHAR(64)           COMMENT '事项产生时的幂等键',
+    -- 条件唯一去重：只有未承接（PENDING）事项参与唯一约束；已承接事项留 NULL（MySQL 唯一索引允许多个 NULL），
+    -- 这样同一业务对象「承接后再次变更」可以生成新的未承接事项
+    dedup_shift_id    BIGINT GENERATED ALWAYS AS (CASE WHEN status = 'PENDING' THEN shift_id ELSE NULL END) VIRTUAL
+                          COMMENT '去重用生成列：未承接=来源班次，已承接=NULL',
+    created_at        DATETIME     NOT NULL COMMENT '创建时间',
+    updated_at        DATETIME     NOT NULL COMMENT '更新时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_handover_item_no (item_no),
+    -- 未承接事项业务唯一键：同一班次对同一业务对象只保留一条未承接事项（已承接不参与）
+    UNIQUE KEY uk_item_open_dedup (dedup_shift_id, ref_type, ref_id, change_kind),
+    KEY idx_item_shift (shift_id),
+    KEY idx_item_target_status (target_shift_id, status),
+    KEY idx_item_status (status),
+    CONSTRAINT fk_item_shift FOREIGN KEY (shift_id) REFERENCES duty_shift (id),
+    CONSTRAINT fk_item_target_shift FOREIGN KEY (target_shift_id) REFERENCES duty_shift (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '值班交接事项';
+
+-- ---------------------------------------------------------------------------
+-- 承接确认记录：逐项承接，一个事项至多一条（uk 唯一约束兜底）。
+-- 重复点击 / 网络重试携带同一 requestId 只会取回同一条，绝不产生重复承接记录。
+-- ---------------------------------------------------------------------------
+CREATE TABLE handover_acceptance (
+    id          BIGINT       NOT NULL AUTO_INCREMENT,
+    item_id     BIGINT       NOT NULL COMMENT '承接的事项',
+    shift_id    BIGINT       NOT NULL COMMENT '承接班次（下一班）',
+    acceptor    VARCHAR(64)  NOT NULL COMMENT '承接负责人',
+    note        VARCHAR(500)          COMMENT '承接说明',
+    request_id  VARCHAR(64)           COMMENT '前端幂等键',
+    created_at  DATETIME     NOT NULL COMMENT '承接时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_acceptance_item (item_id),
+    UNIQUE KEY uk_acceptance_request (request_id),
+    KEY idx_acceptance_shift (shift_id),
+    CONSTRAINT fk_acceptance_item FOREIGN KEY (item_id) REFERENCES handover_item (id),
+    CONSTRAINT fk_acceptance_shift FOREIGN KEY (shift_id) REFERENCES duty_shift (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '交接事项承接确认';
+
+-- ---------------------------------------------------------------------------
+-- 交接事项操作流水：只追加，永不修改、永不删除。
+-- CREATE 建项 / SUPPLEMENT 补充 / PRIORITY 优先级 / ASSIGN 分派负责人 /
+-- DISPATCH 分派班次 / ACCEPT 承接 / DELAY 延期。
+-- 「普通教练只能补充自己负责事项」「已承接不能改回」等审计都靠这条链回放。
+-- ---------------------------------------------------------------------------
+CREATE TABLE handover_item_log (
+    id          BIGINT       NOT NULL AUTO_INCREMENT,
+    item_id     BIGINT       NOT NULL COMMENT '所属事项',
+    action      VARCHAR(24)  NOT NULL COMMENT 'CREATE / SUPPLEMENT / PRIORITY / ASSIGN / DISPATCH / ACCEPT / DELAY',
+    note        VARCHAR(500) NOT NULL COMMENT '本次操作说明',
+    operator    VARCHAR(64)  NOT NULL COMMENT '操作人',
+    role        VARCHAR(16)  NOT NULL COMMENT 'STAFF 普通教练 / MANAGER 值班负责人',
+    request_id  VARCHAR(64)           COMMENT '前端幂等键（重复提交共用一条流水）',
+    created_at  DATETIME     NOT NULL COMMENT '操作时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_item_log_request (request_id),
+    KEY idx_item_log_item (item_id, id),
+    CONSTRAINT fk_item_log_item FOREIGN KEY (item_id) REFERENCES handover_item (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '交接事项操作流水（只追加）';
+
 -- ===========================================================================
 -- 种子数据
 -- ===========================================================================
@@ -441,3 +578,101 @@ WHERE horse_id = 5
 
 -- 事件链上一共动过 3 次（登记 / 流转 / 复查），马匹健康版本与之一致
 UPDATE horse SET health_version = 3 WHERE id = 5;
+
+-- ===========================================================================
+-- 值班交接种子数据
+-- 设计口径：一进来首页（值班交接台）就能看到「下一班仍有 1 条未承接事项」，
+-- 并且历史班次里同时存在「已逐项承接」与「记录延期原因后结班」两种情形。
+--   DS-000001：昨天的班，负责人陈骁，今早已结班
+--     HI-1 已满员场次（明天 10:00）—— 已分派给 DS-2 且赵崇已逐项承接
+--     HI-2 已满员私教（4 天后）    —— DS-1 结班时仍未承接，逐项记录延期原因后结班，
+--                                     事项保持待承接继续挂在 DS-2 首页（跨班次不消失）
+--     HI-3 玉兔休养待复查          —— 已分派给 DS-2 且已承接
+--   DS-000002：今天的班，负责人赵崇，进行中
+--     开班快照重新定格：两场满员课、玉兔休养、STM-008 维护中
+-- ===========================================================================
+INSERT INTO duty_shift
+(id, shift_no, shift_date, leader_name, handover_note, status, item_version, started_at, closed_at, created_at, updated_at) VALUES
+(1, 'DS-000001', DATE_SUB(CURDATE(), INTERVAL 1 DAY), '陈骁',
+ '昨夜一切正常；玉兔跛行复查逾期已在跟进，两场满员课请下一班留意到场情况。',
+ 'CLOSED', 5,
+ DATE_SUB(NOW(), INTERVAL 1 DAY), DATE_SUB(NOW(), INTERVAL 8 HOUR),
+ DATE_SUB(NOW(), INTERVAL 1 DAY), DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(2, 'DS-000002', CURDATE(), '赵崇',
+ NULL, 'OPEN', 4,
+ DATE_SUB(NOW(), INTERVAL 8 HOUR), NULL,
+ DATE_SUB(NOW(), INTERVAL 8 HOUR), DATE_SUB(NOW(), INTERVAL 8 HOUR));
+
+-- DS-1 产生的事项（开班快照）
+INSERT INTO handover_item
+(id, item_no, shift_id, target_shift_id, item_type, ref_type, ref_id, change_kind,
+ title, detail, priority, owner_name, status, expected_version,
+ accepted_at, accepted_by, accepted_note, delay_reason, delayed_at, delayed_by, request_id, created_at, updated_at) VALUES
+(1, 'HI-000001', 1, 2, 'SESSION', 'SESSION_CHANGE', 2, 'FULL',
+ '已满员课程：明天 10:00 初级场地训练（林婉）',
+ '场次 #2 已约满 4/4，明天 10:00-11:00，教练林婉、用马灰姑娘；请留意到场与候补。',
+ 'NORMAL', '林婉', 'ACCEPTED', 2,
+ DATE_SUB(NOW(), INTERVAL 7 HOUR), '赵崇', '已核对名单，4 人均已确认到场。',
+ NULL, NULL, NULL, 'seed-hi-1',
+ DATE_SUB(NOW(), INTERVAL 1 DAY), DATE_SUB(NOW(), INTERVAL 7 HOUR)),
+(2, 'HI-000002', 1, 2, 'SESSION', 'SESSION_CHANGE', 8, 'FULL',
+ '已满员私教：4 天后 10:00 一对一私教课（赵崇）',
+ '场次 #8 私教已约满 1/1，会员吴启航；备赛期间用马追风，需确认是否加开候补场。',
+ 'NORMAL', '赵崇', 'PENDING', 1,
+ NULL, NULL, NULL,
+ '会员临时改需求未联系上，吴启航今天到店，下一班当面确认是否改约或加场。',
+ DATE_SUB(NOW(), INTERVAL 8 HOUR), '陈骁', 'seed-hi-2',
+ DATE_SUB(NOW(), INTERVAL 1 DAY), DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(3, 'HI-000003', 1, 2, 'HORSE', 'HORSE_STATUS', 5, NULL,
+ '马匹休养：玉兔（H-005）轻度跛行待复查',
+ '右前肢轻度跛行，健康事件 HE-000001 停在待复查且预计复查日已过，名下未来排期已标记受影响，复训须负责人放行。',
+ 'HIGH', NULL, 'ACCEPTED', 2,
+ DATE_SUB(NOW(), INTERVAL 7 HOUR), '赵崇', '已知悉，今天联系兽医老李安排复查。',
+ NULL, NULL, NULL, 'seed-hi-3',
+ DATE_SUB(NOW(), INTERVAL 1 DAY), DATE_SUB(NOW(), INTERVAL 7 HOUR)),
+-- DS-2 开班快照（未分派，本版处理）
+(4, 'HI-000004', 2, NULL, 'SESSION', 'SESSION_CHANGE', 2, 'FULL',
+ '已满员课程：明天 10:00 初级场地训练（林婉）',
+ '场次 #2 已约满 4/4，明天 10:00-11:00，教练林婉、用马灰姑娘。',
+ 'NORMAL', '林婉', 'PENDING', 0,
+ NULL, NULL, NULL, NULL, NULL, NULL, 'seed-hi-4',
+ DATE_SUB(NOW(), INTERVAL 8 HOUR), DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(5, 'HI-000005', 2, NULL, 'SESSION', 'SESSION_CHANGE', 8, 'FULL',
+ '已满员私教：4 天后 10:00 一对一私教课（赵崇）',
+ '场次 #8 私教已约满 1/1，会员吴启航。',
+ 'NORMAL', '赵崇', 'PENDING', 0,
+ NULL, NULL, NULL, NULL, NULL, NULL, 'seed-hi-5',
+ DATE_SUB(NOW(), INTERVAL 8 HOUR), DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(6, 'HI-000006', 2, NULL, 'HORSE', 'HORSE_STATUS', 5, NULL,
+ '马匹休养：玉兔（H-005）轻度跛行待复查',
+ '健康事件 HE-000001 待复查且预计复查日已过 1 天；休养中禁止排课，复训须负责人放行。',
+ 'HIGH', NULL, 'PENDING', 0,
+ NULL, NULL, NULL, NULL, NULL, NULL, 'seed-hi-6',
+ DATE_SUB(NOW(), INTERVAL 8 HOUR), DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(7, 'HI-000007', 2, NULL, 'STALL', 'STALL_MAINT', 8, NULL,
+ '栏位维护中：STM-008（B 区马房）',
+ 'STM-008 维护中，禁止入栏；完工后需做出栏验收再恢复空闲。',
+ 'NORMAL', NULL, 'PENDING', 0,
+ NULL, NULL, NULL, NULL, NULL, NULL, 'seed-hi-7',
+ DATE_SUB(NOW(), INTERVAL 8 HOUR), DATE_SUB(NOW(), INTERVAL 8 HOUR));
+
+-- 承接记录：每个事项至多一条
+INSERT INTO handover_acceptance (id, item_id, shift_id, acceptor, note, request_id, created_at) VALUES
+(1, 1, 2, '赵崇', '已核对名单，4 人均已确认到场。', 'seed-accept-1', DATE_SUB(NOW(), INTERVAL 7 HOUR)),
+(2, 3, 2, '赵崇', '已知悉，今天联系兽医老李安排复查。', 'seed-accept-3', DATE_SUB(NOW(), INTERVAL 7 HOUR));
+
+-- 操作流水（只追加）
+INSERT INTO handover_item_log (id, item_id, action, note, operator, role, request_id, created_at) VALUES
+(1, 1, 'CREATE', '开班快照：场次 #2 已满员 4/4，列入交接清单', '陈骁', 'MANAGER', 'seed-hi-1', DATE_SUB(NOW(), INTERVAL 1 DAY)),
+(2, 1, 'DISPATCH', '随 DS-000001 交接分派给下一班 DS-000002', '陈骁', 'MANAGER', 'seed-hi-1-dispatch', DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(3, 1, 'ACCEPT', '已核对名单，4 人均已确认到场。', '赵崇', 'MANAGER', 'seed-accept-1', DATE_SUB(NOW(), INTERVAL 7 HOUR)),
+(4, 2, 'CREATE', '开班快照：场次 #8 私教已满员，列入交接清单', '陈骁', 'MANAGER', 'seed-hi-2', DATE_SUB(NOW(), INTERVAL 1 DAY)),
+(5, 2, 'DELAY', '会员临时改需求未联系上，吴启航今天到店，下一班当面确认是否改约或加场。', '陈骁', 'MANAGER', 'seed-hi-2-delay', DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(6, 2, 'DISPATCH', '结班时仍未承接，已记录延期原因并随交接转给 DS-000002', '陈骁', 'MANAGER', 'seed-hi-2-dispatch', DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(7, 3, 'CREATE', '开班快照：玉兔休养中、复查逾期，列入交接清单', '陈骁', 'MANAGER', 'seed-hi-3', DATE_SUB(NOW(), INTERVAL 1 DAY)),
+(8, 3, 'DISPATCH', '随 DS-000001 交接分派给下一班 DS-000002', '陈骁', 'MANAGER', 'seed-hi-3-dispatch', DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(9, 3, 'ACCEPT', '已知悉，今天联系兽医老李安排复查。', '赵崇', 'MANAGER', 'seed-accept-3', DATE_SUB(NOW(), INTERVAL 7 HOUR)),
+(10, 4, 'CREATE', '开班快照：场次 #2 已满员 4/4，列入交接清单', '赵崇', 'MANAGER', 'seed-hi-4', DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(11, 5, 'CREATE', '开班快照：场次 #8 私教已满员，列入交接清单', '赵崇', 'MANAGER', 'seed-hi-5', DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(12, 6, 'CREATE', '开班快照：玉兔休养中、复查逾期，列入交接清单', '赵崇', 'MANAGER', 'seed-hi-6', DATE_SUB(NOW(), INTERVAL 8 HOUR)),
+(13, 7, 'CREATE', '开班快照：STM-008 维护中，列入交接清单', '赵崇', 'MANAGER', 'seed-hi-7', DATE_SUB(NOW(), INTERVAL 8 HOUR));

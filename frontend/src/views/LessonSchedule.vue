@@ -74,11 +74,28 @@
                 <el-tag v-if="session.healthAffected" type="danger" size="small" effect="dark">
                   健康事件受影响
                 </el-tag>
+                <el-tag
+                  v-if="session.handover"
+                  size="small"
+                  :type="session.handover.itemStatus === 'ACCEPTED' ? 'success' : 'warning'"
+                  effect="dark"
+                  :title="handoverTip(session.handover)"
+                >
+                  交接 {{ session.handover.shiftNo }} · {{ session.handover.itemStatusName }}
+                </el-tag>
               </div>
               <div class="session__meta">
                 教练 {{ session.coachName }}
                 <template v-if="session.horseName"> · 用马 {{ session.horseName }}（{{ session.horseNo }}）</template>
                 <template v-else> · 未指定用马</template>
+              </div>
+              <div v-if="session.handover" class="session__meta">
+                交接事项 {{ session.handover.itemNo }}（{{ session.handover.changeKindName || '当班课程' }}）
+                · 属于班次 {{ session.handover.shiftNo }}（{{ session.handover.shiftDate }}）
+                <template v-if="session.handover.targetShiftNo"> · 已派给 {{ session.handover.targetShiftNo }}</template>
+                <template v-if="session.handover.acceptedBy">
+                  · 最近承接：{{ session.handover.acceptedBy }}（{{ session.handover.acceptedShiftNo }}）
+                </template>
               </div>
               <el-progress
                 :percentage="percent(session)"
@@ -166,6 +183,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
+import { identity } from '../identity'
 
 const lessons = ref([])
 const coaches = ref([])
@@ -242,6 +260,18 @@ function nextHour(slot) {
   return String((hour + 1) % 24).padStart(2, '0') + ':' + slot.slice(3)
 }
 
+/** 交接标签悬浮提示：班次归属 + 最近一次承接记录 */
+function handoverTip(handover) {
+  const parts = [`交接事项 ${handover.itemNo}，属于班次 ${handover.shiftNo}（${handover.shiftDate}）`]
+  if (handover.targetShiftNo) parts.push(`已分派给 ${handover.targetShiftNo}`)
+  if (handover.acceptedBy) {
+    parts.push(`最近一次承接：${handover.acceptedBy} 于 ${handover.acceptedShiftNo}`)
+  } else {
+    parts.push('尚未被下一班逐项确认承接')
+  }
+  return parts.join('；')
+}
+
 async function load() {
   try {
     const [lessonList, coachList, horseList, sessionList] = await Promise.all([
@@ -281,7 +311,8 @@ async function submit() {
       sessionDate: form.sessionDate,
       startTime: form.startTime,
       endTime: nextHour(form.startTime),
-      capacity: form.capacity
+      capacity: form.capacity,
+      operatorName: identity.name || '值班台'
     })
     ElMessage.success('排期已创建')
     createDialog.value = false
@@ -304,7 +335,7 @@ async function cancel(session) {
     return
   }
   try {
-    await api.cancelSession(session.id)
+    await api.cancelSession(session.id, { operatorName: identity.name || '值班台' })
     ElMessage.success('排期已取消')
     await load()
   } catch (error) {

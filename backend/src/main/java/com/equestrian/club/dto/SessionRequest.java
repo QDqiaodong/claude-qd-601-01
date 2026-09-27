@@ -14,6 +14,9 @@ public class SessionRequest {
     /** 不传则取课程自身的容量 */
     private Integer capacity;
 
+    /** 操作人（前端身份附带）；用于把课程变更挂入当班交接清单，可空 */
+    private String operatorName;
+
     public Long getLessonId() {
         return lessonId;
     }
@@ -68,5 +71,13 @@ public class SessionRequest {
 
     public void setCapacity(Integer capacity) {
         this.capacity = capacity;
+    }
+
+    public String getOperatorName() {
+        return operatorName;
+    }
+
+    public void setOperatorName(String operatorName) {
+        this.operatorName = operatorName;
     }
 }

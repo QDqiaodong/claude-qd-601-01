@@ -186,6 +186,89 @@ public final class EquestrianDict {
             ROLE_STAFF, "工作人员",
             ROLE_MANAGER, "负责人");
 
+    // ---------------- 值班班次状态 ----------------
+    public static final String SHIFT_OPEN = "OPEN";
+    public static final String SHIFT_CLOSED = "CLOSED";
+
+    private static final Map<String, String> SHIFT_STATUS = Map.of(
+            SHIFT_OPEN, "进行中",
+            SHIFT_CLOSED, "已结束");
+
+    // ---------------- 交接事项状态机 ----------------
+    /** 待承接：未分派或已分派未确认；班次结束不消失，继续挂在下一班首页 */
+    public static final String ITEM_PENDING = "PENDING";
+    /** 已承接（终态）：由目标班次负责人逐项确认后进入，任何旧班次不能改回 */
+    public static final String ITEM_ACCEPTED = "ACCEPTED";
+
+    private static final Map<String, String> ITEM_STATUS = Map.of(
+            ITEM_PENDING, "待承接",
+            ITEM_ACCEPTED, "已承接");
+
+    // ---------------- 交接事项优先级 ----------------
+    public static final String PRIORITY_HIGH = "HIGH";
+    public static final String PRIORITY_NORMAL = "NORMAL";
+    public static final String PRIORITY_LOW = "LOW";
+
+    private static final Map<String, String> ITEM_PRIORITY = Map.of(
+            PRIORITY_HIGH, "高",
+            PRIORITY_NORMAL, "普通",
+            PRIORITY_LOW, "低");
+
+    // ---------------- 交接事项来源类型 ----------------
+    public static final String ITEM_TYPE_SESSION = "SESSION";
+    public static final String ITEM_TYPE_HORSE = "HORSE";
+    public static final String ITEM_TYPE_STALL = "STALL";
+    public static final String ITEM_TYPE_MANUAL = "MANUAL";
+
+    private static final Map<String, String> ITEM_TYPE = Map.of(
+            ITEM_TYPE_SESSION, "课程",
+            ITEM_TYPE_HORSE, "马匹",
+            ITEM_TYPE_STALL, "栏位",
+            ITEM_TYPE_MANUAL, "手工");
+
+    // ---------------- 交接事项引用类型（去重键的一部分） ----------------
+    /** 课程变更（新排期 / 取消 / 健康受影响 / 满员） */
+    public static final String REF_SESSION_CHANGE = "SESSION_CHANGE";
+    /** 马匹状态（休养待复查等） */
+    public static final String REF_HORSE_STATUS = "HORSE_STATUS";
+    /** 栏位维护中 */
+    public static final String REF_STALL_MAINT = "STALL_MAINT";
+    /** 手工补充 */
+    public static final String REF_MANUAL = "MANUAL";
+
+    // ---------------- 课程变更细分 ----------------
+    /** 当班课程（开班快照定格的今日场次） */
+    public static final String CHANGE_SCHEDULED = "SCHEDULED";
+    public static final String CHANGE_NEW = "NEW";
+    public static final String CHANGE_CANCELED = "CANCELED";
+    public static final String CHANGE_AFFECTED = "AFFECTED";
+    public static final String CHANGE_FULL = "FULL";
+
+    private static final Map<String, String> CHANGE_KIND = Map.of(
+            CHANGE_SCHEDULED, "当班课程",
+            CHANGE_NEW, "新排期",
+            CHANGE_CANCELED, "取消排期",
+            CHANGE_AFFECTED, "健康受影响",
+            CHANGE_FULL, "已满员");
+
+    // ---------------- 交接事项操作流水动作 ----------------
+    public static final String ITEM_LOG_CREATE = "CREATE";
+    public static final String ITEM_LOG_SUPPLEMENT = "SUPPLEMENT";
+    public static final String ITEM_LOG_PRIORITY = "PRIORITY";
+    public static final String ITEM_LOG_ASSIGN = "ASSIGN";
+    public static final String ITEM_LOG_DISPATCH = "DISPATCH";
+    public static final String ITEM_LOG_ACCEPT = "ACCEPT";
+    public static final String ITEM_LOG_DELAY = "DELAY";
+
+    private static final Map<String, String> ITEM_LOG_ACTION = Map.of(
+            ITEM_LOG_CREATE, "建项",
+            ITEM_LOG_SUPPLEMENT, "补充说明",
+            ITEM_LOG_PRIORITY, "调整优先级",
+            ITEM_LOG_ASSIGN, "分派负责人",
+            ITEM_LOG_DISPATCH, "分派班次",
+            ITEM_LOG_ACCEPT, "承接确认",
+            ITEM_LOG_DELAY, "记录延期");
+
     // ---------------- 训练日历时段 ----------------
     /** 训练日历固定时段起点（整点，每次一小时） */
     public static final List<String> TIME_SLOTS = List.of(
@@ -252,6 +335,46 @@ public final class EquestrianDict {
 
     public static String roleName(String role) {
         return role == null ? "" : ROLE_NAME.getOrDefault(role, role);
+    }
+
+    public static boolean isValidShiftStatus(String status) {
+        return status != null && SHIFT_STATUS.containsKey(status);
+    }
+
+    public static String shiftStatusName(String status) {
+        return status == null ? "" : SHIFT_STATUS.getOrDefault(status, status);
+    }
+
+    public static boolean isValidItemStatus(String status) {
+        return status != null && ITEM_STATUS.containsKey(status);
+    }
+
+    public static String itemStatusName(String status) {
+        return status == null ? "" : ITEM_STATUS.getOrDefault(status, status);
+    }
+
+    public static boolean isValidItemPriority(String priority) {
+        return priority != null && ITEM_PRIORITY.containsKey(priority);
+    }
+
+    public static String itemPriorityName(String priority) {
+        return priority == null ? "" : ITEM_PRIORITY.getOrDefault(priority, priority);
+    }
+
+    public static boolean isValidItemType(String itemType) {
+        return itemType != null && ITEM_TYPE.containsKey(itemType);
+    }
+
+    public static String itemTypeName(String itemType) {
+        return itemType == null ? "" : ITEM_TYPE.getOrDefault(itemType, itemType);
+    }
+
+    public static String changeKindName(String changeKind) {
+        return changeKind == null ? "" : CHANGE_KIND.getOrDefault(changeKind, changeKind);
+    }
+
+    public static String itemLogActionName(String action) {
+        return action == null ? "" : ITEM_LOG_ACTION.getOrDefault(action, action);
     }
 
     public static boolean isValidHorseStatus(String status) {

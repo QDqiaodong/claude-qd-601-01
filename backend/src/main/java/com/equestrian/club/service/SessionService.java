@@ -5,6 +5,7 @@ import java.util.List;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.context.ApplicationEventPublisher;
 
 import com.equestrian.club.common.BizException;
 import com.equestrian.club.dict.EquestrianDict;
@@ -19,9 +20,13 @@ import com.equestrian.club.dto.SessionRequest;
 import com.equestrian.club.dto.view.CoachView;
 import com.equestrian.club.dto.view.LessonView;
 import com.equestrian.club.dto.view.SessionView;
+import com.equestrian.club.event.SessionChangedEvent;
 
 /**
  * 骑乘课程与排期模块：课程容量 / 同一教练同一时段不重叠 / 退役或休养的马匹禁止排课。
+ *
+ * <p>排期新建 / 取消成功后发布 {@link SessionChangedEvent}，交接链路据此把「新出现的
+ * 课程变更」挂入当前最新 OPEN 班次，保证变更进对班次。
  */
 @Service
 public class SessionService {
@@ -30,15 +35,21 @@ public class SessionService {
     private final CoachRepository coachRepository;
     private final LessonSessionRepository sessionRepository;
     private final HorseService horseService;
+    private final ApplicationEventPublisher eventPublisher;
+    private final HandoverService handoverService;
 
     public SessionService(LessonRepository lessonRepository,
             CoachRepository coachRepository,
             LessonSessionRepository sessionRepository,
-            HorseService horseService) {
+            HorseService horseService,
+            ApplicationEventPublisher eventPublisher,
+            HandoverService handoverService) {
         this.lessonRepository = lessonRepository;
         this.coachRepository = coachRepository;
         this.sessionRepository = sessionRepository;
         this.horseService = horseService;
+        this.eventPublisher = eventPublisher;
+        this.handoverService = handoverService;
     }
 
     // ---------------- 课程 / 教练字典查询 ----------------
@@ -157,12 +168,16 @@ public class SessionService {
         session.setStatus(EquestrianDict.SESSION_SCHEDULED);
         session.setHealthAffected(false);
 
-        return toView(sessionRepository.save(session));
+        LessonSession saved = sessionRepository.save(session);
+        // 新出现的课程变更进入当前最新 OPEN 班次的交接清单（同事务，挂入失败整笔回滚）
+        eventPublisher.publishEvent(new SessionChangedEvent(
+                saved.getId(), EquestrianDict.CHANGE_NEW, trimToNull(request.getOperatorName())));
+        return toView(saved);
     }
 
     /** 取消排期：已约满或已排期的场次都可以取消，已取消的不能再取消 */
     @Transactional
-    public SessionView cancel(Long id) {
+    public SessionView cancel(Long id, String operatorName) {
         LessonSession session = require(id);
         if (EquestrianDict.SESSION_CANCELED.equals(session.getStatus())) {
             throw new BizException("排期（" + session.getSessionDate() + " " + session.getStartTime()
@@ -173,7 +188,11 @@ public class SessionService {
                     + "）已有 " + session.getBookedCount() + " 条有效预约，请先取消会员的骑乘记录");
         }
         session.setStatus(EquestrianDict.SESSION_CANCELED);
-        return toView(sessionRepository.save(session));
+        LessonSession saved = sessionRepository.save(session);
+        // 取消也是课程变更：挂入当前最新 OPEN 班次的交接清单（同事务）
+        eventPublisher.publishEvent(new SessionChangedEvent(
+                saved.getId(), EquestrianDict.CHANGE_CANCELED, trimToNull(operatorName)));
+        return toView(saved);
     }
 
     // ---------------- 视图组装 ----------------
@@ -245,6 +264,15 @@ public class SessionService {
                 Math.max(capacity - booked, 0),
                 session.getStatus(),
                 EquestrianDict.sessionStatusName(session.getStatus()),
-                Boolean.TRUE.equals(session.getHealthAffected()));
+                Boolean.TRUE.equals(session.getHealthAffected()),
+                handoverService.sessionHandoverSummary(session.getId()));
+    }
+
+    private String trimToNull(String text) {
+        if (text == null) {
+            return null;
+        }
+        String trimmed = text.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 }

@@ -6,6 +6,7 @@ import HealthDesk from '../views/HealthDesk.vue'
 import LessonSchedule from '../views/LessonSchedule.vue'
 import CoachBoard from '../views/CoachBoard.vue'
 import MemberDesk from '../views/MemberDesk.vue'
+import HandoverDesk from '../views/HandoverDesk.vue'
 
 /**
  * 轻量前端路由。
@@ -16,6 +17,13 @@ import MemberDesk from '../views/MemberDesk.vue'
  * 用法对页面完全透明：navigate('/stalls') 切页，route.title 给顶栏标题。
  */
 export const menuGroups = [
+  {
+    key: 'g-handover',
+    label: '值班交接',
+    items: [
+      { path: '/handover', label: '值班交接台', title: '值班交接台 · 未结事项承接', hint: '开班自动生成交接清单；下一班逐项确认承接，未确认事项不消失，历史班次按日期 / 负责人 / 事项状态可查' }
+    ]
+  },
   {
     key: 'g-horse',
     label: '马匹与马房',
@@ -55,6 +63,7 @@ export const route = reactive({
 export const currentView = shallowRef(markRaw(HorseWall))
 
 const viewByPath = {
+  '/handover': markRaw(HandoverDesk),
   '/horses': markRaw(HorseWall),
   '/health': markRaw(HealthDesk),
   '/stalls': markRaw(StallBoard),

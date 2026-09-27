@@ -75,7 +75,7 @@ export const api = {
   coaches: () => call(http.get('/coaches')),
   sessions: () => call(http.get('/sessions')),
   createSession: (body) => call(http.post('/sessions', body)),
-  cancelSession: (id) => call(http.post(`/sessions/${id}/cancel`)),
+  cancelSession: (id, body) => call(http.post(`/sessions/${id}/cancel`, body)),
 
   // 模块四：会员与骑乘记录
   members: () => call(http.get('/members')),
@@ -95,7 +95,22 @@ export const api = {
   supplementEvent: (id, body) => call(http.post(`/health-events/${id}/supplement`, body)),
   transitionEvent: (id, body) => call(http.post(`/health-events/${id}/transition`, body)),
   reviewEvent: (id, body) => call(http.post(`/health-events/${id}/reviews`, body)),
-  releaseHorse: (horseId, body) => call(http.post(`/health-events/horse/${horseId}/release`, body))
+  releaseHorse: (horseId, body) => call(http.post(`/health-events/horse/${horseId}/release`, body)),
+
+  // 模块六：值班交接与未结事项承接
+  activeShift: () => call(http.get('/duty/shifts/active')),
+  dutyHistory: (params = {}) => call(http.get('/duty/shifts', { params })),
+  shift: (id) => call(http.get(`/duty/shifts/${id}`)),
+  closeBlockers: (id) => call(http.get(`/duty/shifts/${id}/close-blockers`)),
+  createShift: (body) => call(http.post('/duty/shifts', body)),
+  updateShiftNote: (id, body) => call(http.put(`/duty/shifts/${id}/note`, body)),
+  closeShift: (id, body) => call(http.post(`/duty/shifts/${id}/close`, body)),
+  createItem: (shiftId, body) => call(http.post(`/duty/shifts/${shiftId}/items`, body)),
+  item: (id) => call(http.get(`/duty/items/${id}`)),
+  supplementItem: (id, body) => call(http.post(`/duty/items/${id}/supplement`, body)),
+  updateItem: (id, body) => call(http.post(`/duty/items/${id}`, body)),
+  dispatchItem: (id, body) => call(http.post(`/duty/items/${id}/dispatch`, body)),
+  acceptItem: (id, body) => call(http.post(`/duty/items/${id}/accept`, body))
 }
 
 export default api

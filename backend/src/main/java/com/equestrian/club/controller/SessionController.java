@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.equestrian.club.common.ApiResponse;
+import com.equestrian.club.dto.OperatorRequest;
 import com.equestrian.club.dto.SessionRequest;
 import com.equestrian.club.dto.view.CoachView;
 import com.equestrian.club.dto.view.LessonView;
@@ -53,7 +54,9 @@ public class SessionController {
     }
 
     @PostMapping("/sessions/{id}/cancel")
-    public ApiResponse<SessionView> cancel(@PathVariable Long id) {
-        return ApiResponse.success("排期已取消", sessionService.cancel(id));
+    public ApiResponse<SessionView> cancel(@PathVariable Long id,
+            @RequestBody(required = false) OperatorRequest request) {
+        String operatorName = request == null ? null : request.getOperatorName();
+        return ApiResponse.success("排期已取消", sessionService.cancel(id, operatorName));
     }
 }
