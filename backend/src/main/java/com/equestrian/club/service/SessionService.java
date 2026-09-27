@@ -2,7 +2,10 @@ package com.equestrian.club.service;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -18,6 +21,7 @@ import com.equestrian.club.domain.LessonSessionRepository;
 import com.equestrian.club.dto.SessionRequest;
 import com.equestrian.club.dto.view.CoachView;
 import com.equestrian.club.dto.view.LessonView;
+import com.equestrian.club.dto.view.SessionDutyView;
 import com.equestrian.club.dto.view.SessionView;
 
 /**
@@ -31,14 +35,22 @@ public class SessionService {
     private final LessonSessionRepository sessionRepository;
     private final HorseService horseService;
 
+    /**
+     * 值班交接信息用 ObjectProvider 懒加载：DutyShiftService 不反向依赖本服务，
+     * 这里懒取仅为避免课程列表冷启动时初始化顺序耦合。
+     */
+    private final ObjectProvider<DutyShiftService> dutyShiftServiceProvider;
+
     public SessionService(LessonRepository lessonRepository,
             CoachRepository coachRepository,
             LessonSessionRepository sessionRepository,
-            HorseService horseService) {
+            HorseService horseService,
+            ObjectProvider<DutyShiftService> dutyShiftServiceProvider) {
         this.lessonRepository = lessonRepository;
         this.coachRepository = coachRepository;
         this.sessionRepository = sessionRepository;
         this.horseService = horseService;
+        this.dutyShiftServiceProvider = dutyShiftServiceProvider;
     }
 
     // ---------------- 课程 / 教练字典查询 ----------------
@@ -57,13 +69,22 @@ public class SessionService {
 
     @Transactional(readOnly = true)
     public List<SessionView> list() {
-        return sessionRepository.findAllByOrderBySessionDateAscStartTimeAscIdAsc()
-                .stream().map(this::toView).toList();
+        List<LessonSession> sessions =
+                sessionRepository.findAllByOrderBySessionDateAscStartTimeAscIdAsc();
+        // 批量挂值班交接信息，避免逐场 N+1
+        Set<Long> ids = sessions.stream().map(LessonSession::getId).collect(Collectors.toSet());
+        java.util.Map<Long, SessionDutyView> dutyMap =
+                dutyShiftServiceProvider.getObject().dutyBySessionIds(ids);
+        return sessions.stream()
+                .map(session -> toView(session).withDuty(dutyMap.get(session.getId())))
+                .toList();
     }
 
     @Transactional(readOnly = true)
     public SessionView detail(Long id) {
-        return toView(require(id));
+        LessonSession session = require(id);
+        SessionDutyView duty = dutyShiftServiceProvider.getObject().dutyBySessionId(id);
+        return toView(session).withDuty(duty);
     }
 
     /** 供骑乘记录模块复用的取排期方法：可空外键先判 null 再查库 */
@@ -245,6 +266,7 @@ public class SessionService {
                 Math.max(capacity - booked, 0),
                 session.getStatus(),
                 EquestrianDict.sessionStatusName(session.getStatus()),
-                Boolean.TRUE.equals(session.getHealthAffected()));
+                Boolean.TRUE.equals(session.getHealthAffected()),
+                null);
     }
 }

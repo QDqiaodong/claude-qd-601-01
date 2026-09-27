@@ -15,4 +15,7 @@ public interface StallRepository extends JpaRepository<Stall, Long> {
 
     /** 找出某匹马当前占用的栏位（一匹马只能占一个栏位） */
     Optional<Stall> findByHorseId(Long horseId);
+
+    /** 值班交接清单：所有维护中的栏位 */
+    List<Stall> findByStatusOrderByIdAsc(String status);
 }

@@ -3,6 +3,8 @@ package com.equestrian.club.common;
 import java.util.stream.Collectors;
 
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -28,6 +30,26 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ConflictException.class)
     public ResponseEntity<ApiResponse<Void>> handleConflict(ConflictException e) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail(e.getMessage()));
+    }
+
+    /**
+     * JPA 乐观锁兜底（@Version 版本号落后）：两笔提交基于同一旧版本时后提交的一方在此失败，
+     * 整个事务回滚，不会留下「状态改了、承接记录没写」的半条记录。统一转 409 要求重新载入。
+     */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<ApiResponse<Void>> handleOptimistic(OptimisticLockingFailureException e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail(
+                "数据已被其他人更新（班次建立、事项补充或承接确认刚发生），请重新载入最新交接清单后再提交，本次旧内容未保存"));
+    }
+
+    /**
+     * 悲观锁等待超时：交接写事务都串行在班次锁上，正常不会触发；触发时同样要求重新载入，
+     * 由前端整单重试而不是让用户看到 500。
+     */
+    @ExceptionHandler(PessimisticLockingFailureException.class)
+    public ResponseEntity<ApiResponse<Void>> handlePessimistic(PessimisticLockingFailureException e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail(
+                "交接数据正被其他班次操作占用，请稍后重新载入最新清单再提交"));
     }
 
     /**

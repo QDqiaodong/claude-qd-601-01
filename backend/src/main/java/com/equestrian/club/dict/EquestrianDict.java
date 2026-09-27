@@ -186,6 +186,69 @@ public final class EquestrianDict {
             ROLE_STAFF, "工作人员",
             ROLE_MANAGER, "负责人");
 
+    // ---------------- 值班班次 ----------------
+    /** 班次进行中（允许同时存在上一班未承接完 + 下一班已建立两个 OPEN） */
+    public static final String SHIFT_OPEN = "OPEN";
+    /** 班次已结束；结束后事项仍可能滚动到下一班，不允许再改本班承接结果 */
+    public static final String SHIFT_CLOSED = "CLOSED";
+
+    private static final Map<String, String> SHIFT_STATUS = Map.of(
+            SHIFT_OPEN, "进行中",
+            SHIFT_CLOSED, "已结束");
+
+    /** 白班 / 夜班（按日轮班，仅做标识，不参与取号） */
+    public static final String PERIOD_DAY = "DAY";
+    public static final String PERIOD_NIGHT = "NIGHT";
+
+    private static final Map<String, String> PERIOD_NAME = Map.of(
+            PERIOD_DAY, "白班",
+            PERIOD_NIGHT, "夜班");
+
+    // ---------------- 交接事项 ----------------
+    public static final String ITEM_TYPE_LESSON = "LESSON";
+    public static final String ITEM_TYPE_HORSE = "HORSE";
+    public static final String ITEM_TYPE_STALL = "STALL";
+    public static final String ITEM_TYPE_OTHER = "OTHER";
+
+    private static final Map<String, String> ITEM_TYPE = Map.of(
+            ITEM_TYPE_LESSON, "课程",
+            ITEM_TYPE_HORSE, "马匹",
+            ITEM_TYPE_STALL, "栏位",
+            ITEM_TYPE_OTHER, "其他");
+
+    public static final String PRIORITY_LOW = "LOW";
+    public static final String PRIORITY_NORMAL = "NORMAL";
+    public static final String PRIORITY_HIGH = "HIGH";
+    public static final String PRIORITY_URGENT = "URGENT";
+
+    private static final Map<String, String> PRIORITY = Map.of(
+            PRIORITY_LOW, "低",
+            PRIORITY_NORMAL, "普通",
+            PRIORITY_HIGH, "高",
+            PRIORITY_URGENT, "紧急");
+
+    /** 待处理：开班生成后 / 尚未分派 */
+    public static final String ITEM_PENDING = "PENDING";
+    /** 已分派：负责人已指定下一班负责教练，等下一班逐项确认 */
+    public static final String ITEM_DISPATCHED = "DISPATCHED";
+    /** 已承接：下一班负责人逐项确认后的终态，任何班次都不能再改回未处理 */
+    public static final String ITEM_ACCEPTED = "ACCEPTED";
+
+    private static final Map<String, String> ITEM_STATUS = Map.of(
+            ITEM_PENDING, "待处理",
+            ITEM_DISPATCHED, "已分派",
+            ITEM_ACCEPTED, "已承接");
+
+    /**
+     * 事项状态机许可边：只许向前，不许回退。
+     * 待处理 / 已分派都可以直接被下一班负责人承接（已分派非承接前置），
+     * 已承接没有任何出边——旧班次拿旧页面提交也改不回未处理。
+     */
+    private static final Map<String, List<String>> ITEM_STATUS_EDGE = Map.of(
+            ITEM_PENDING, List.of(ITEM_DISPATCHED, ITEM_ACCEPTED),
+            ITEM_DISPATCHED, List.of(ITEM_ACCEPTED),
+            ITEM_ACCEPTED, List.of());
+
     // ---------------- 训练日历时段 ----------------
     /** 训练日历固定时段起点（整点，每次一小时） */
     public static final List<String> TIME_SLOTS = List.of(
@@ -252,6 +315,73 @@ public final class EquestrianDict {
 
     public static String roleName(String role) {
         return role == null ? "" : ROLE_NAME.getOrDefault(role, role);
+    }
+
+    public static boolean isValidShiftStatus(String status) {
+        return status != null && SHIFT_STATUS.containsKey(status);
+    }
+
+    public static String shiftStatusName(String status) {
+        return status == null ? "" : SHIFT_STATUS.getOrDefault(status, status);
+    }
+
+    public static boolean isValidPeriod(String period) {
+        return period != null && PERIOD_NAME.containsKey(period);
+    }
+
+    public static String periodName(String period) {
+        return period == null ? "" : PERIOD_NAME.getOrDefault(period, period);
+    }
+
+    public static boolean isValidItemType(String type) {
+        return type != null && ITEM_TYPE.containsKey(type);
+    }
+
+    public static String itemTypeName(String type) {
+        return type == null ? "" : ITEM_TYPE.getOrDefault(type, type);
+    }
+
+    public static boolean isValidPriority(String priority) {
+        return priority != null && PRIORITY.containsKey(priority);
+    }
+
+    public static String priorityName(String priority) {
+        return priority == null ? "" : PRIORITY.getOrDefault(priority, priority);
+    }
+
+    /** 紧急 / 高优先级事项在交接清单中排序靠前 */
+    public static int priorityRank(String priority) {
+        if (PRIORITY_URGENT.equals(priority)) {
+            return 0;
+        }
+        if (PRIORITY_HIGH.equals(priority)) {
+            return 1;
+        }
+        if (PRIORITY_NORMAL.equals(priority)) {
+            return 2;
+        }
+        return 3;
+    }
+
+    public static boolean isValidItemStatus(String status) {
+        return status != null && ITEM_STATUS.containsKey(status);
+    }
+
+    public static String itemStatusName(String status) {
+        return status == null ? "" : ITEM_STATUS.getOrDefault(status, status);
+    }
+
+    public static List<String> itemStatusTargets(String status) {
+        return ITEM_STATUS_EDGE.getOrDefault(status, List.of());
+    }
+
+    public static boolean canTransferItemStatus(String from, String to) {
+        return itemStatusTargets(from).contains(to);
+    }
+
+    /** 未结事项（必须继续显示在下一班首页、阻止无延期理由关班） */
+    public static boolean isOpenItem(String status) {
+        return ITEM_PENDING.equals(status) || ITEM_DISPATCHED.equals(status);
     }
 
     public static boolean isValidHorseStatus(String status) {

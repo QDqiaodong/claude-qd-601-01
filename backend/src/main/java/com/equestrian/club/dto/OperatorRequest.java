@@ -20,6 +20,13 @@ public class OperatorRequest {
      */
     private String requestId;
 
+    /**
+     * 值班交接场景：当前操作人对应的教练 id。
+     * 普通教练（STAFF）补充事项时后端用它校验「只能补充分派给自己的事项」；
+     * 负责人（MANAGER）不需要，传空即可。
+     */
+    private Long coachId;
+
     public String getOperatorName() {
         return operatorName;
     }
@@ -42,5 +49,13 @@ public class OperatorRequest {
 
     public void setRequestId(String requestId) {
         this.requestId = requestId;
+    }
+
+    public Long getCoachId() {
+        return coachId;
+    }
+
+    public void setCoachId(Long coachId) {
+        this.coachId = coachId;
     }
 }

@@ -28,4 +28,11 @@ public interface LessonSessionRepository extends JpaRepository<LessonSession, Lo
             Long horseId, LocalDate from, String excludedStatus);
 
     long countByLessonId(Long lessonId);
+
+    /**
+     * 值班交接清单同步：全部「受健康事件影响且未取消」的场次（含当天与未来），
+     * 这些场次需要换马 / 改期，必须逐场进入当班交接清单。
+     */
+    List<LessonSession> findByHealthAffectedTrueAndStatusNotOrderBySessionDateAscStartTimeAsc(
+            String excludedStatus);
 }

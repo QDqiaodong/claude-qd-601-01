@@ -21,6 +21,10 @@ SET NAMES utf8mb4;
 
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS riding_record;
+DROP TABLE IF EXISTS duty_item_note;
+DROP TABLE IF EXISTS duty_acceptance;
+DROP TABLE IF EXISTS duty_item;
+DROP TABLE IF EXISTS duty_shift;
 DROP TABLE IF EXISTS health_event_session;
 DROP TABLE IF EXISTS health_review;
 DROP TABLE IF EXISTS health_event_log;
@@ -298,6 +302,117 @@ CREATE TABLE health_event_session (
     CONSTRAINT fk_hes_session FOREIGN KEY (session_id) REFERENCES lesson_session (id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '健康事件影响的未来排期（可追溯，不删排期）';
 
+-- ---------------------------------------------------------------------------
+-- 值班班次：值班负责人建立，结束班次也只能由负责人完成。
+-- OPEN 进行中 / CLOSED 已结束。同一时间允许存在两个 OPEN：上一班有未承接事项、
+-- 下一班已建立（事项跨班次滚动承接），所以不用「唯一的进行中班次」这类约束。
+-- version 是乐观锁：旧班次页面拿着旧 version 提交（结束班次 / 改事项）时直接冲突，
+-- 提示数据已变化并要求重新载入，不能让旧班次把下一班的承接结果覆盖。
+-- ---------------------------------------------------------------------------
+CREATE TABLE duty_shift (
+    id            BIGINT       NOT NULL AUTO_INCREMENT,
+    shift_no      VARCHAR(32)  NOT NULL COMMENT '班次编号，唯一，形如 DS-000001',
+    business_date DATE         NOT NULL COMMENT '值班日期（按日轮班）',
+    period        VARCHAR(16)  NOT NULL COMMENT 'DAY 白班 / NIGHT 夜班',
+    manager_name  VARCHAR(64)  NOT NULL COMMENT '当班值班负责人姓名',
+    handover_note VARCHAR(1000)         COMMENT '班次交接总说明（负责人补充）',
+    status        VARCHAR(16)  NOT NULL COMMENT 'OPEN 进行中 / CLOSED 已结束',
+    -- 上一班：当班建立时指向当时的最新班次，承接链按它串起来，历史可逐级回溯
+    prev_shift_id BIGINT                COMMENT '上一班次 id（承接链）',
+    started_at    DATETIME     NOT NULL COMMENT '开班时间',
+    closed_at     DATETIME              COMMENT '结束班次时间',
+    closed_by     VARCHAR(64)           COMMENT '结束班次操作人',
+    delay_reason  VARCHAR(500)          COMMENT '仍有未承接事项时负责人记录的延期原因',
+    version       BIGINT       NOT NULL DEFAULT 0 COMMENT '班次乐观锁版本',
+    -- 清单版本：只要本班清单发生变化（开班滚动、事项同步、补充、分派、承接、关班滚动），
+    -- 就由 service 显式 +1。页面回传它做过期提交判断——事项从旧班滚动到下一班时
+    -- 旧班次行本身没变（JPA @Version 不动），靠 list_seq 才能让旧班次页面感知到 409。
+    list_seq      BIGINT       NOT NULL DEFAULT 0 COMMENT '交接清单版本（前端乐观提交依据）',
+    created_at    DATETIME     NOT NULL COMMENT '创建时间',
+    updated_at    DATETIME     NOT NULL COMMENT '更新时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_duty_shift_no (shift_no),
+    KEY idx_shift_date (business_date),
+    KEY idx_shift_status (status),
+    CONSTRAINT fk_shift_prev FOREIGN KEY (prev_shift_id) REFERENCES duty_shift (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '值班班次';
+
+-- ---------------------------------------------------------------------------
+-- 交接事项：建班时从当班课程 / 马匹状态 / 栏位安排中生成，负责人也可手工补充。
+-- 来源固定（SOURCE_SHIFT 开班生成 / SOURCE_MANUAL 负责人补充 / SOURCE_SYNC 期间新变更），
+-- 状态 PENDING 待处理 -> DISPATCHED 已分派 -> ACCEPTED 已承接 单向推进；
+-- ACCEPTED 是终态，旧班次的任何操作都不能把它改回去（后端状态机强制）。
+-- owner_coach_id 可空：分派给某位教练后才有值；普通教练只能补充自己负责的事项。
+-- current_shift_id 是事项当前所在班次：跨班承接时从旧班次滚动到新班次，
+-- 「未确认的事项必须继续显示在下一班首页」就靠它实现，与 originating 班次分离。
+-- ---------------------------------------------------------------------------
+CREATE TABLE duty_item (
+    id                BIGINT       NOT NULL AUTO_INCREMENT,
+    item_no           VARCHAR(32)  NOT NULL COMMENT '事项编号，唯一，形如 DI-000001',
+    originating_shift_id BIGINT    NOT NULL COMMENT '事项最初产生的班次',
+    current_shift_id  BIGINT       NOT NULL COMMENT '事项当前所在班次（跨班承接滚动）',
+    item_type         VARCHAR(16)  NOT NULL COMMENT 'LESSON 课程 / HORSE 马匹 / STALL 栏位 / OTHER 其他',
+    ref_id            BIGINT                COMMENT '关联对象 id（课程场次 / 马匹 / 栏位；OTHER 可空）',
+    title             VARCHAR(200) NOT NULL COMMENT '事项标题',
+    detail            VARCHAR(1000)         COMMENT '事项说明（开班时由系统快照生成）',
+    priority          VARCHAR(16)  NOT NULL DEFAULT 'NORMAL' COMMENT 'LOW / NORMAL / HIGH / URGENT',
+    status            VARCHAR(16)  NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING / DISPATCHED / ACCEPTED',
+    owner_coach_id    BIGINT                COMMENT '分派给的负责教练（可空=未分派）',
+    delay_note        VARCHAR(500)          COMMENT '该事项的延期说明（结束班次仍未承接时逐条记录）',
+    accepted_shift_id BIGINT                COMMENT '实际承接该事项的班次',
+    accepted_at       DATETIME              COMMENT '承接时间',
+    accepted_by       VARCHAR(64)           COMMENT '承接确认人（下一班负责人）',
+    version           BIGINT       NOT NULL DEFAULT 0 COMMENT '事项乐观锁版本',
+    created_at        DATETIME     NOT NULL COMMENT '创建时间',
+    updated_at        DATETIME     NOT NULL COMMENT '更新时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_duty_item_no (item_no),
+    KEY idx_item_current (current_shift_id, status),
+    KEY idx_item_origin (originating_shift_id),
+    KEY idx_item_owner (owner_coach_id),
+    CONSTRAINT fk_item_origin_shift FOREIGN KEY (originating_shift_id) REFERENCES duty_shift (id),
+    CONSTRAINT fk_item_current_shift FOREIGN KEY (current_shift_id) REFERENCES duty_shift (id),
+    CONSTRAINT fk_item_accepted_shift FOREIGN KEY (accepted_shift_id) REFERENCES duty_shift (id),
+    CONSTRAINT fk_item_coach FOREIGN KEY (owner_coach_id) REFERENCES coach (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '值班交接事项';
+
+-- ---------------------------------------------------------------------------
+-- 事项补充记录：只追加、永不修改、永不删除。
+-- 普通教练只能给自己负责的事项补充；值班负责人可补充本班全部事项。
+-- ---------------------------------------------------------------------------
+CREATE TABLE duty_item_note (
+    id          BIGINT       NOT NULL AUTO_INCREMENT,
+    item_id     BIGINT       NOT NULL COMMENT '所属事项',
+    note        VARCHAR(1000) NOT NULL COMMENT '本次补充说明',
+    operator    VARCHAR(64)  NOT NULL COMMENT '补充人',
+    role        VARCHAR(16)  NOT NULL COMMENT 'STAFF 普通教练 / MANAGER 值班负责人',
+    coach_id    BIGINT                COMMENT '补充人对应的教练 id（普通教练补充时校验归属）',
+    created_at  DATETIME     NOT NULL COMMENT '补充时间',
+    PRIMARY KEY (id),
+    KEY idx_note_item (item_id, id),
+    CONSTRAINT fk_note_item FOREIGN KEY (item_id) REFERENCES duty_item (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '交接事项补充记录（只追加）';
+
+-- ---------------------------------------------------------------------------
+-- 承接确认记录：下一班负责人逐项确认，一项最多一条。
+-- request_id 是幂等键：重复确认拿到同一条记录，绝不产生重复承接。
+-- ---------------------------------------------------------------------------
+CREATE TABLE duty_acceptance (
+    id            BIGINT       NOT NULL AUTO_INCREMENT,
+    item_id       BIGINT       NOT NULL COMMENT '被承接的事项（一项最多一条）',
+    shift_id      BIGINT       NOT NULL COMMENT '执行承接确认的班次（下一班）',
+    acceptor_name VARCHAR(64)  NOT NULL COMMENT '承接确认人（下一班负责人）',
+    note          VARCHAR(500)          COMMENT '承接备注',
+    request_id    VARCHAR(64)           COMMENT '前端幂等键',
+    accepted_at   DATETIME     NOT NULL COMMENT '承接时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_accept_item (item_id),
+    UNIQUE KEY uk_accept_request (request_id),
+    KEY idx_accept_shift (shift_id),
+    CONSTRAINT fk_accept_item FOREIGN KEY (item_id) REFERENCES duty_item (id),
+    CONSTRAINT fk_accept_shift FOREIGN KEY (shift_id) REFERENCES duty_shift (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '交接事项承接确认记录';
+
 -- ===========================================================================
 -- 种子数据
 -- ===========================================================================
@@ -361,7 +476,9 @@ INSERT INTO lesson_session (id, lesson_id, coach_id, horse_id, session_date, sta
 (9,  2, 1, 3,    DATE_ADD(CURDATE(), INTERVAL 5 DAY), '15:00', '16:00', 4, 0, 'SCHEDULED', NOW(), NOW()),
 (10, 3, 2, 4,    DATE_SUB(CURDATE(), INTERVAL 3 DAY), '14:00', '15:00', 4, 3, 'SCHEDULED', NOW(), NOW()),
 (11, 1, 1, 2,    DATE_SUB(CURDATE(), INTERVAL 5 DAY), '09:00', '10:00', 6, 2, 'SCHEDULED', NOW(), NOW()),
-(12, 5, 3, 1,    DATE_ADD(CURDATE(), INTERVAL 2 DAY), '15:00', '16:00', 1, 0, 'CANCELED',  NOW(), NOW());
+(12, 5, 3, 1,    DATE_ADD(CURDATE(), INTERVAL 2 DAY), '15:00', '16:00', 1, 0, 'CANCELED',  NOW(), NOW()),
+-- 场次 13：玉兔（H-005，休养中）名下的未来受影响场次，开班生成交接清单时必能看到
+(13, 1, 2, 5,    DATE_ADD(CURDATE(), INTERVAL 2 DAY), '10:00', '11:00', 6, 0, 'SCHEDULED', NOW(), NOW());
 
 -- 会员：M-005 未通过初级考核；M-006 剩余次数为 0；M-004 次数够但余额不足
 INSERT INTO club_member (id, member_no, name, phone, level, card_balance, card_times, passed_basic, status, created_at, updated_at) VALUES
@@ -441,3 +558,74 @@ WHERE horse_id = 5
 
 -- 事件链上一共动过 3 次（登记 / 流转 / 复查），马匹健康版本与之一致
 UPDATE horse SET health_version = 3 WHERE id = 5;
+
+-- ===========================================================================
+-- 值班班次 / 交接事项种子数据
+-- 设计口径：
+--   DS-000001 昨日班次已结束：当天事项有的当场承接，有的延期滚动；
+--   DS-000002 今日白班进行中：承接链上挂着上一班延期事项（含已分派/待处理），
+--   加上当班课程（H-005 受影响场次 13）、马匹（玉兔休养）、栏位（STM-008 维护）
+--   自动生成的未结事项，下一班首页立刻能看到「必须继续承接」的清单。
+-- ===========================================================================
+
+INSERT INTO duty_shift
+(id, shift_no, business_date, period, manager_name, handover_note, status, prev_shift_id,
+ started_at, closed_at, closed_by, delay_reason, version, created_at, updated_at) VALUES
+(1, 'DS-000001', DATE_SUB(CURDATE(), INTERVAL 1 DAY), 'DAY', '陈骁',
+ '昨日白班：玉兔跛行事件转观察，ST8 栏位维修待跟进，今日白班务必逐项承接。',
+ 'CLOSED', NULL,
+ DATE_SUB(NOW(), INTERVAL 1 DAY), DATE_SUB(NOW(), INTERVAL 25 HOUR), '陈骁',
+ '玉兔复查结论仍为继续观察，马匹护理事项延期至今日白班跟进', 3, 5,
+ DATE_SUB(NOW(), INTERVAL 1 DAY), DATE_SUB(NOW(), INTERVAL 25 HOUR)),
+(2, 'DS-000002', CURDATE(), 'DAY', '陈骁',
+ '今日白班开班：请逐场核对受影响课程，玉兔右前肢恢复情况需向兽医确认。',
+ 'OPEN', 1,
+ DATE_SUB(NOW(), INTERVAL 2 HOUR), NULL, NULL, NULL, 1, 4,
+ DATE_SUB(NOW(), INTERVAL 2 HOUR), NOW());
+
+-- 事项 1：昨日的 STM-008 维护跟进，已由今日白班负责人确认承接（承接记录在下）
+INSERT INTO duty_item
+(id, item_no, originating_shift_id, current_shift_id, item_type, ref_id, title, detail,
+ priority, status, owner_coach_id, delay_note, accepted_shift_id, accepted_at, accepted_by,
+ version, created_at, updated_at) VALUES
+(1, 'DI-000001', 1, 2, 'STALL', 8, 'STM-008 栏位木板维修后验收',
+ 'B 区马房 STM-008 维护中，昨日更换破损栏门木板，今日需检查合页与插销后再恢复入栏。',
+ 'HIGH', 'ACCEPTED', 3, NULL, 2, DATE_SUB(NOW(), INTERVAL 1 HOUR), '陈骁',
+ 2, DATE_SUB(NOW(), INTERVAL 1 DAY), DATE_SUB(NOW(), INTERVAL 1 HOUR)),
+-- 事项 2：昨日延期的玉兔护理事项，已分派给林婉（C-02），尚未被下一班确认
+(2, 'DI-000002', 1, 2, 'HORSE', 5, '玉兔右前肢冰敷与跛行观察',
+ '昨日复查结论为继续观察：每日两次冰敷右前肢，记录快步点头幅度，复查日已逾期需尽快安排。',
+ 'URGENT', 'DISPATCHED', 2,
+ '复查逾期，事项延期至今日白班，继续原护理方案', NULL, NULL, NULL,
+ 2, DATE_SUB(NOW(), INTERVAL 1 DAY), DATE_SUB(NOW(), INTERVAL 30 MINUTE)),
+-- 事项 3：开班自动生成的课程事项——玉兔名下受影响的场次 13，待处理
+(3, 'DI-000003', 2, 2, 'LESSON', 13, '受影响课程待改期：初级骑乘入门',
+ '后天 10:00-11:00 场次原定用马玉兔（休养中），已被健康事件 HE-000001 标记受影响，请安排换马或联系会员改期。',
+ 'HIGH', 'PENDING', NULL, NULL, NULL, NULL, NULL,
+ 0, NOW(), NOW()),
+-- 事项 4：开班自动生成的马匹事项——玉兔休养 + 未闭环事件
+(4, 'DI-000004', 2, 2, 'HORSE', 5, '玉兔休养中，健康事件 HE-000001 待复查',
+ '玉兔右前肢轻度跛行，事件停在待复查且复查日已逾期，合格复查后需由负责人复训放行才能恢复排课。',
+ 'URGENT', 'PENDING', NULL, NULL, NULL, NULL, NULL,
+ 0, NOW(), NOW()),
+-- 事项 5：开班自动生成的栏位事项——STM-008 维护中
+(5, 'DI-000005', 2, 2, 'STALL', 8, 'STM-008 处于维护中，完成后需恢复空闲',
+ 'B 区马房 STM-008 正在维护，维护结束前禁止入栏；维修完成后请在栏位看板执行「恢复」。',
+ 'NORMAL', 'PENDING', NULL, NULL, NULL, NULL, NULL,
+ 0, NOW(), NOW()),
+-- 事项 6：负责人手工补充的其他事项，普通教练也能看到
+(6, 'DI-000006', 2, 2, 'OTHER', NULL, '下午三点前统计明日私教到场名单',
+ 'L-PRV-01 一对一私教课明日 10:00 已满员，需提前电话确认会员到场与用马状态。',
+ 'NORMAL', 'PENDING', NULL, NULL, NULL, NULL, NULL,
+ 1, NOW(), NOW());
+
+-- 事项补充记录（只追加）：事项 2 当班教练、负责人各补过一次
+INSERT INTO duty_item_note (id, item_id, note, operator, role, coach_id, created_at) VALUES
+(1, 2, '昨日晚间冰敷后跛行未见加重，但快步仍有轻微点头', '林婉', 'STAFF', 2, DATE_SUB(NOW(), INTERVAL 20 HOUR)),
+(2, 2, '已电话联系兽医老李，今日上午到场复查', '陈骁', 'MANAGER', NULL, DATE_SUB(NOW(), INTERVAL 30 MINUTE)),
+(3, 1, '木板与合页已更换完毕，待今日验收', '赵崇', 'STAFF', 3, DATE_SUB(NOW(), INTERVAL 26 HOUR));
+
+-- 承接确认记录：事项 1 已被今日白班负责人逐项确认（一项一条，重复确认不会产生第二条）
+INSERT INTO duty_acceptance (id, item_id, shift_id, acceptor_name, note, request_id, accepted_at) VALUES
+(1, 1, 2, '陈骁', '合页插销已检查，验收通过，待维修班组恢复栏位', 'seed-accept-di-000001',
+ DATE_SUB(NOW(), INTERVAL 1 HOUR));

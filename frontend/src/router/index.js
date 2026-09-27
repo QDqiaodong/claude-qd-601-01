@@ -6,6 +6,7 @@ import HealthDesk from '../views/HealthDesk.vue'
 import LessonSchedule from '../views/LessonSchedule.vue'
 import CoachBoard from '../views/CoachBoard.vue'
 import MemberDesk from '../views/MemberDesk.vue'
+import DutyBoard from '../views/DutyBoard.vue'
 
 /**
  * 轻量前端路由。
@@ -39,6 +40,14 @@ export const menuGroups = [
     items: [
       { path: '/members', label: '会员与骑乘记录', title: '会员与骑乘记录', hint: '会员卡余额与次数在这里扣减，记录必须挂在已排期的课程上' }
     ]
+  },
+  {
+    key: 'g-duty',
+    label: '值班交接',
+    items: [
+      { path: '/duty', label: '值班交接台', title: '值班交接台 · 未结事项承接', hint: '开班自动汇总课程、马匹、栏位未结事项；下一班逐项确认承接，未确认事项跨班不消失' },
+      { path: '/duty-history', label: '历史班次查询', title: '历史值班班次', hint: '按日期、负责人、事项状态追溯每一班的交接与承接记录' }
+    ]
   }
 ]
 
@@ -60,7 +69,9 @@ const viewByPath = {
   '/stalls': markRaw(StallBoard),
   '/lessons': markRaw(LessonSchedule),
   '/coaches': markRaw(CoachBoard),
-  '/members': markRaw(MemberDesk)
+  '/members': markRaw(MemberDesk),
+  '/duty': markRaw(DutyBoard),
+  '/duty-history': markRaw(DutyHistory)
 }
 
 export function navigate(path) {

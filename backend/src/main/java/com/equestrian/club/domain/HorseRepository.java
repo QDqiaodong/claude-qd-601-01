@@ -14,6 +14,9 @@ public interface HorseRepository extends JpaRepository<Horse, Long> {
 
     List<Horse> findAllByOrderByIdAsc();
 
+    /** 值班交接清单：所有休养中的马（含健康事件未闭环） */
+    List<Horse> findByStatusOrderByIdAsc(String status);
+
     Optional<Horse> findByHorseNo(String horseNo);
 
     boolean existsByHorseNo(String horseNo);

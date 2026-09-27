@@ -90,6 +90,31 @@
               <div class="session__meta">
                 已约 {{ session.bookedCount }} / {{ session.capacity }}，剩余 {{ session.remain }} 个名额
               </div>
+              <!-- 值班交接信息：该场次属于哪个班次、当前事项状态、最近一次承接 -->
+              <div v-if="session.duty && session.duty.tracked" class="session__duty">
+                <div
+                  v-for="dutyItem in session.duty.items"
+                  :key="dutyItem.id"
+                  class="dutyline"
+                >
+                  <el-tag size="small" :type="dutyStatusTag(dutyItem.status)" effect="dark">
+                    交接·{{ dutyItem.statusName }}
+                  </el-tag>
+                  <span class="dutyline__shift">所属班次 {{ dutyItem.originatingShiftNo }}</span>
+                  <span class="eq-muted">{{ dutyItem.title }}</span>
+                </div>
+                <div v-if="session.duty.latestAcceptance" class="dutyline dutyline--accepted">
+                  <el-tag size="small" type="success">最近承接</el-tag>
+                  <span class="eq-muted">
+                    {{ formatDutyTime(session.duty.latestAcceptance.acceptedAt) }}
+                    {{ session.duty.latestAcceptance.acceptorName }}
+                    在 {{ session.duty.latestAcceptance.shiftNo }} 确认
+                    <template v-if="session.duty.latestAcceptance.note">
+                      ：{{ session.duty.latestAcceptance.note }}
+                    </template>
+                  </span>
+                </div>
+              </div>
             </div>
             <div class="session__ops">
               <el-button
@@ -228,6 +253,16 @@ function tagOf(status) {
   if (status === 'FULL') return 'danger'
   if (status === 'CANCELED') return 'info'
   return 'success'
+}
+
+function dutyStatusTag(status) {
+  if (status === 'PENDING') return 'danger'
+  if (status === 'DISPATCHED') return 'warning'
+  return 'success'
+}
+
+function formatDutyTime(text) {
+  return text ? String(text).replace('T', ' ').slice(0, 16) : ''
 }
 
 function percent(session) {
@@ -473,5 +508,31 @@ watch(
 .session__ops {
   display: flex;
   justify-content: flex-end;
+}
+
+.session__duty {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px dashed #e8ddd7;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dutyline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.dutyline__shift {
+  color: #6d4c41;
+  font-weight: 600;
+}
+
+.dutyline--accepted {
+  margin-top: 2px;
 }
 </style>

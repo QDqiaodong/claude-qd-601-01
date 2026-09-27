@@ -95,7 +95,21 @@ export const api = {
   supplementEvent: (id, body) => call(http.post(`/health-events/${id}/supplement`, body)),
   transitionEvent: (id, body) => call(http.post(`/health-events/${id}/transition`, body)),
   reviewEvent: (id, body) => call(http.post(`/health-events/${id}/reviews`, body)),
-  releaseHorse: (horseId, body) => call(http.post(`/health-events/horse/${horseId}/release`, body))
+  releaseHorse: (horseId, body) => call(http.post(`/health-events/horse/${horseId}/release`, body)),
+
+  // 模块六：值班班次与交接清单
+  dutyBoard: (coachId) => call(http.get('/duty/board', { params: { coachId } })),
+  dutyShifts: (params = {}) => call(http.get('/duty/shifts', { params })),
+  dutyShift: (id) => call(http.get(`/duty/shifts/${id}`)),
+  dutyPrecheck: (id, body) => call(http.post(`/duty/shifts/${id}/precheck`, body)),
+  openDutyShift: (body) => call(http.post('/duty/shifts', body)),
+  updateHandoverNote: (id, body) => call(http.post(`/duty/shifts/${id}/handover-note`, body)),
+  closeDutyShift: (id, body) => call(http.post(`/duty/shifts/${id}/close`, body)),
+  syncDutyShift: (id, body) => call(http.post(`/duty/shifts/${id}/sync`, body)),
+  createDutyItem: (id, body) => call(http.post(`/duty/shifts/${id}/items`, body)),
+  supplementDutyItem: (id, body) => call(http.post(`/duty/items/${id}/notes`, body)),
+  dispatchDutyItem: (id, body) => call(http.post(`/duty/items/${id}/dispatch`, body)),
+  acceptDutyItem: (id, body) => call(http.post(`/duty/items/${id}/accept`, body))
 }
 
 export default api
